@@ -1,0 +1,16 @@
+[package]
+name = "chinese_fonts"
+version = "0.1.0"
+authors = ["foxx <foxxcn@gmail.com>"]
+edition = "2024"
+description = "Chinese font support example for iced GUI framework"
+keywords = ["gui", "chinese", "fonts", "iced", "cjk"]
+categories = ["gui", "internationalization"]
+publish = false
+
+[dependencies]
+iced.workspace = true
+
+[[bin]]
+name = "chinese_fonts"
+path = "src/main.rs" 

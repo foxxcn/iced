@@ -3,7 +3,7 @@ use crate::core::layout;
 use crate::core::mouse;
 use crate::core::overlay;
 use crate::core::renderer;
-use crate::core::text;
+use crate::core::time::{Duration, Instant};
 use crate::core::widget;
 use crate::core::widget::tree::{self, Tree};
 use crate::core::window;
@@ -16,19 +16,26 @@ use crate::core::{
 ///
 /// It can even notify you with anticipation at a given distance!
 #[allow(missing_debug_implementations)]
-pub struct Pop<'a, Message, Theme = crate::Theme, Renderer = crate::Renderer> {
+pub struct Pop<
+    'a,
+    Key,
+    Message,
+    Theme = crate::Theme,
+    Renderer = crate::Renderer,
+> {
     content: Element<'a, Message, Theme, Renderer>,
-    key: Option<text::Fragment<'a>>,
+    key: Key,
     on_show: Option<Box<dyn Fn(Size) -> Message + 'a>>,
     on_resize: Option<Box<dyn Fn(Size) -> Message + 'a>>,
     on_hide: Option<Message>,
     anticipate: Pixels,
+    delay: Duration,
 }
 
-impl<'a, Message, Theme, Renderer> Pop<'a, Message, Theme, Renderer>
+impl<'a, Message, Theme, Renderer> Pop<'a, (), Message, Theme, Renderer>
 where
-    Renderer: core::Renderer,
     Message: Clone,
+    Renderer: core::Renderer,
 {
     /// Creates a new [`Pop`] widget with the given content.
     pub fn new(
@@ -36,14 +43,22 @@ where
     ) -> Self {
         Self {
             content: content.into(),
-            key: None,
+            key: (),
             on_show: None,
             on_resize: None,
             on_hide: None,
             anticipate: Pixels::ZERO,
+            delay: Duration::ZERO,
         }
     }
+}
 
+impl<'a, Key, Message, Theme, Renderer> Pop<'a, Key, Message, Theme, Renderer>
+where
+    Message: Clone,
+    Key: self::Key,
+    Renderer: core::Renderer,
+{
     /// Sets the message to be produced when the content pops into view.
     ///
     /// The closure will receive the [`Size`] of the content in that moment.
@@ -72,9 +87,44 @@ where
     /// Sets the key of the [`Pop`] widget, for continuity.
     ///
     /// If the key changes, the [`Pop`] widget will trigger again.
-    pub fn key(mut self, key: impl text::IntoFragment<'a>) -> Self {
-        self.key = Some(key.into_fragment());
-        self
+    pub fn key<K>(
+        self,
+        key: K,
+    ) -> Pop<'a, impl self::Key, Message, Theme, Renderer>
+    where
+        K: Clone + PartialEq + 'static,
+    {
+        Pop {
+            content: self.content,
+            key: OwnedKey(key),
+            on_show: self.on_show,
+            on_resize: self.on_resize,
+            on_hide: self.on_hide,
+            anticipate: self.anticipate,
+            delay: self.delay,
+        }
+    }
+
+    /// Sets the key of the [`Pop`] widget, for continuity; using a reference.
+    ///
+    /// If the key changes, the [`Pop`] widget will trigger again.
+    pub fn key_ref<K>(
+        self,
+        key: &'a K,
+    ) -> Pop<'a, &'a K, Message, Theme, Renderer>
+    where
+        K: ToOwned + PartialEq<K::Owned> + ?Sized,
+        K::Owned: 'static,
+    {
+        Pop {
+            content: self.content,
+            key,
+            on_show: self.on_show,
+            on_resize: self.on_resize,
+            on_hide: self.on_hide,
+            anticipate: self.anticipate,
+            delay: self.delay,
+        }
     }
 
     /// Sets the distance in [`Pixels`] to use in anticipation of the
@@ -86,27 +136,47 @@ where
         self.anticipate = distance.into();
         self
     }
+
+    /// Sets the amount of time to wait before firing an [`on_show`] or
+    /// [`on_hide`] event; after the content is shown or hidden.
+    ///
+    /// When combined with [`key`], this can be useful to debounce key changes.
+    ///
+    /// [`on_show`]: Self::on_show
+    /// [`on_hide`]: Self::on_hide
+    /// [`key`]: Self::key
+    pub fn delay(mut self, delay: impl Into<Duration>) -> Self {
+        self.delay = delay.into();
+        self
+    }
 }
 
-#[derive(Debug, Clone, Default)]
-struct State {
+#[derive(Debug, Clone)]
+struct State<Key> {
     has_popped_in: bool,
+    should_notify_at: Option<(bool, Instant)>,
     last_size: Option<Size>,
-    last_key: Option<String>,
+    last_key: Key,
 }
 
-impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer>
-    for Pop<'_, Message, Theme, Renderer>
+impl<Key, Message, Theme, Renderer> Widget<Message, Theme, Renderer>
+    for Pop<'_, Key, Message, Theme, Renderer>
 where
+    Key: self::Key,
     Message: Clone,
     Renderer: core::Renderer,
 {
     fn tag(&self) -> tree::Tag {
-        tree::Tag::of::<State>()
+        tree::Tag::of::<State<Key::Owned>>()
     }
 
     fn state(&self) -> tree::State {
-        tree::State::new(State::default())
+        tree::State::new(State {
+            has_popped_in: false,
+            should_notify_at: None,
+            last_size: None,
+            last_key: self.key.to_owned(),
+        })
     }
 
     fn children(&self) -> Vec<Tree> {
@@ -128,15 +198,13 @@ where
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
-        if let Event::Window(window::Event::RedrawRequested(_)) = &event {
-            let state = tree.state.downcast_mut::<State>();
+        if let Event::Window(window::Event::RedrawRequested(now)) = &event {
+            let state = tree.state.downcast_mut::<State<Key::Owned>>();
 
-            if state.has_popped_in
-                && state.last_key.as_deref() != self.key.as_deref()
-            {
+            if state.has_popped_in && !self.key.eq(&state.last_key) {
                 state.has_popped_in = false;
-                state.last_key =
-                    self.key.as_ref().cloned().map(text::Fragment::into_owned);
+                state.should_notify_at = None;
+                state.last_key = self.key.to_owned();
             }
 
             let bounds = layout.bounds();
@@ -157,19 +225,34 @@ where
                             shell.publish(on_resize(size));
                         }
                     }
-                } else if let Some(on_hide) = &self.on_hide {
+                } else if self.on_hide.is_some() {
                     state.has_popped_in = false;
-                    shell.publish(on_hide.clone());
+                    state.should_notify_at = Some((false, *now + self.delay));
                 }
-            } else if let Some(on_show) = &self.on_show {
-                if distance <= self.anticipate.0 {
-                    let size = bounds.size();
+            } else if self.on_show.is_some() && distance <= self.anticipate.0 {
+                let size = bounds.size();
 
-                    state.has_popped_in = true;
-                    state.last_size = Some(size);
+                state.has_popped_in = true;
+                state.should_notify_at = Some((true, *now + self.delay));
+                state.last_size = Some(size);
+            }
 
-                    shell.publish(on_show(size));
+            match &state.should_notify_at {
+                Some((has_popped_in, at)) if at <= now => {
+                    if *has_popped_in {
+                        if let Some(on_show) = &self.on_show {
+                            shell.publish(on_show(layout.bounds().size()));
+                        }
+                    } else if let Some(on_hide) = &self.on_hide {
+                        shell.publish(on_hide.clone());
+                    }
+
+                    state.should_notify_at = None;
                 }
+                Some((_, at)) => {
+                    shell.request_redraw_at(*at);
+                }
+                None => {}
             }
         }
 
@@ -260,27 +343,97 @@ where
     fn overlay<'b>(
         &'b mut self,
         tree: &'b mut Tree,
-        layout: core::Layout<'_>,
+        layout: core::Layout<'b>,
         renderer: &Renderer,
+        viewport: &Rectangle,
         translation: core::Vector,
     ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
         self.content.as_widget_mut().overlay(
             &mut tree.children[0],
             layout,
             renderer,
+            viewport,
             translation,
         )
     }
 }
 
-impl<'a, Message, Theme, Renderer> From<Pop<'a, Message, Theme, Renderer>>
+impl<'a, Key, Message, Theme, Renderer>
+    From<Pop<'a, Key, Message, Theme, Renderer>>
     for Element<'a, Message, Theme, Renderer>
 where
+    Message: Clone + 'a,
+    Key: self::Key + 'a,
     Renderer: core::Renderer + 'a,
     Theme: 'a,
-    Message: Clone + 'a,
 {
-    fn from(pop: Pop<'a, Message, Theme, Renderer>) -> Self {
+    fn from(pop: Pop<'a, Key, Message, Theme, Renderer>) -> Self {
         Element::new(pop)
+    }
+}
+
+/// The key of a widget.
+///
+/// You should generally not need to care about this trait.
+pub trait Key {
+    /// The owned version of the key.
+    type Owned: 'static;
+
+    /// Returns the owned version of the key.
+    fn to_owned(&self) -> Self::Owned;
+
+    /// Compares the key with the given owned version.
+    fn eq(&self, other: &Self::Owned) -> bool;
+}
+
+impl<T> Key for &T
+where
+    T: ToOwned + PartialEq<T::Owned> + ?Sized,
+    T::Owned: 'static,
+{
+    type Owned = T::Owned;
+
+    fn to_owned(&self) -> <Self as Key>::Owned {
+        ToOwned::to_owned(*self)
+    }
+
+    fn eq(&self, other: &Self::Owned) -> bool {
+        *self == other
+    }
+}
+
+struct OwnedKey<T>(T);
+
+impl<T> Key for OwnedKey<T>
+where
+    T: PartialEq + Clone + 'static,
+{
+    type Owned = T;
+
+    fn to_owned(&self) -> Self::Owned {
+        self.0.clone()
+    }
+
+    fn eq(&self, other: &Self::Owned) -> bool {
+        &self.0 == other
+    }
+}
+
+impl<T> PartialEq<T> for OwnedKey<T>
+where
+    T: PartialEq,
+{
+    fn eq(&self, other: &T) -> bool {
+        &self.0 == other
+    }
+}
+
+impl Key for () {
+    type Owned = ();
+
+    fn to_owned(&self) -> Self::Owned {}
+
+    fn eq(&self, _other: &Self::Owned) -> bool {
+        true
     }
 }

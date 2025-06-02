@@ -3,25 +3,30 @@ mod icon;
 use iced::animation;
 use iced::clipboard;
 use iced::highlighter;
-use iced::task;
-use iced::time::{self, milliseconds, Instant};
+use iced::time::{self, Instant, milliseconds};
 use iced::widget::{
     self, button, center_x, container, horizontal_space, hover, image,
     markdown, pop, right, row, scrollable, text_editor, toggler,
 };
 use iced::window;
-use iced::{Animation, Element, Fill, Font, Subscription, Task, Theme};
+use iced::{
+    Animation, Element, Fill, Font, Function, Subscription, Task, Theme,
+};
 
 use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
 
 pub fn main() -> iced::Result {
-    iced::application("Markdown - Iced", Markdown::update, Markdown::view)
-        .font(icon::FONT)
-        .subscription(Markdown::subscription)
-        .theme(Markdown::theme)
-        .run_with(Markdown::new)
+    iced::application::timed(
+        Markdown::new,
+        Markdown::update,
+        Markdown::subscription,
+        Markdown::view,
+    )
+    .font(icon::FONT)
+    .theme(Markdown::theme)
+    .run()
 }
 
 struct Markdown {
@@ -39,9 +44,7 @@ enum Mode {
 }
 
 enum Image {
-    Loading {
-        _download: task::Handle,
-    },
+    Loading,
     Ready {
         handle: image::Handle,
         fade_in: Animation<bool>,
@@ -59,7 +62,7 @@ enum Message {
     ImageDownloaded(markdown::Url, Result<image::Handle, Error>),
     ToggleStream(bool),
     NextToken,
-    Animate(Instant),
+    Tick,
 }
 
 impl Markdown {
@@ -79,7 +82,9 @@ impl Markdown {
         )
     }
 
-    fn update(&mut self, message: Message) -> Task<Message> {
+    fn update(&mut self, message: Message, now: Instant) -> Task<Message> {
+        self.now = now;
+
         match message {
             Message::Edit(action) => {
                 let is_edit = action.is_edit();
@@ -89,9 +94,6 @@ impl Markdown {
                 if is_edit {
                     self.content = markdown::Content::parse(&self.raw.text());
                     self.mode = Mode::Preview;
-
-                    let images = self.content.images();
-                    self.images.retain(|url, _image| images.contains(url));
                 }
 
                 Task::none()
@@ -107,27 +109,12 @@ impl Markdown {
                     return Task::none();
                 }
 
-                let (download_image, handle) = Task::future({
-                    let url = url.clone();
+                let _ = self.images.insert(url.clone(), Image::Loading);
 
-                    async move {
-                        // Wait half a second for further editions before attempting download
-                        tokio::time::sleep(milliseconds(500)).await;
-                        download_image(url).await
-                    }
-                })
-                .abortable();
-
-                let _ = self.images.insert(
-                    url.clone(),
-                    Image::Loading {
-                        _download: handle.abort_on_drop(),
-                    },
-                );
-
-                download_image.map(move |result| {
-                    Message::ImageDownloaded(url.clone(), result)
-                })
+                Task::perform(
+                    download_image(url.clone()),
+                    Message::ImageDownloaded.with(url),
+                )
             }
             Message::ImageDownloaded(url, result) => {
                 let _ = self.images.insert(
@@ -138,7 +125,7 @@ impl Markdown {
                             fade_in: Animation::new(false)
                                 .quick()
                                 .easing(animation::Easing::EaseInOut)
-                                .go(true),
+                                .go(true, self.now),
                         })
                         .unwrap_or_else(Image::Errored),
                 );
@@ -183,11 +170,7 @@ impl Markdown {
 
                 Task::none()
             }
-            Message::Animate(now) => {
-                self.now = now;
-
-                Task::none()
-            }
+            Message::Tick => Task::none(),
         }
     }
 
@@ -249,7 +232,7 @@ impl Markdown {
             });
 
             if is_animating {
-                window::frames().map(Message::Animate)
+                window::frames().map(|_| Message::Tick)
             } else {
                 Subscription::none()
             }
@@ -285,7 +268,8 @@ impl<'a> markdown::Viewer<'a, Message> for CustomViewer<'a> {
             .into()
         } else {
             pop(horizontal_space())
-                .key(url.as_str())
+                .key_ref(url.as_str())
+                .delay(milliseconds(500))
                 .on_show(|_size| Message::ImageShown(url.clone()))
                 .into()
         }

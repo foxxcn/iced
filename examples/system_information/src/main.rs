@@ -1,13 +1,8 @@
 use iced::widget::{button, center, column, text};
-use iced::{system, Element, Task};
+use iced::{Element, Task, system};
 
 pub fn main() -> iced::Result {
-    iced::application(
-        "System Information - Iced",
-        Example::update,
-        Example::view,
-    )
-    .run_with(Example::new)
+    iced::application(Example::new, Example::update, Example::view).run()
 }
 
 #[derive(Default)]
@@ -102,22 +97,22 @@ impl Example {
                 );
 
                 let memory_readable =
-                    ByteSize::b(information.memory_total).to_string();
+                    ByteSize::b(information.memory_total).to_string_as(true);
 
                 let memory_total = text!(
                     "Memory (total): {} bytes ({memory_readable})",
                     information.memory_total,
                 );
 
-                let memory_text = if let Some(memory_used) =
-                    information.memory_used
-                {
-                    let memory_readable = ByteSize::b(memory_used).to_string();
+                let memory_text =
+                    if let Some(memory_used) = information.memory_used {
+                        let memory_readable =
+                            ByteSize::b(memory_used).to_string_as(true);
 
-                    format!("{memory_used} bytes ({memory_readable})")
-                } else {
-                    String::from("None")
-                };
+                        format!("{memory_used} bytes ({memory_readable})")
+                    } else {
+                        String::from("None")
+                    };
 
                 let memory_used = text!("Memory (used): {memory_text}");
 

@@ -7,8 +7,7 @@ use crate::core::renderer;
 use crate::core::widget;
 use crate::core::widget::tree::{self, Tree};
 use crate::core::{
-    self, Clipboard, Element, Length, Point, Rectangle, Shell, Size, Vector,
-    Widget,
+    self, Clipboard, Element, Length, Rectangle, Shell, Size, Vector, Widget,
 };
 use crate::runtime::overlay::Nested;
 
@@ -77,6 +76,7 @@ pub trait Component<Message, Theme = crate::Theme, Renderer = crate::Renderer> {
     /// By default, it does nothing.
     fn operate(
         &self,
+        _bounds: Rectangle,
         _state: &mut Self::State,
         _operation: &mut dyn widget::Operation,
     ) {
@@ -191,11 +191,13 @@ where
 
     fn rebuild_element_with_operation(
         &self,
+        layout: Layout<'_>,
         operation: &mut dyn widget::Operation,
     ) {
         let heads = self.state.borrow_mut().take().unwrap().into_heads();
 
         heads.component.operate(
+            layout.bounds(),
             self.tree
                 .borrow_mut()
                 .borrow_mut()
@@ -382,7 +384,7 @@ where
         renderer: &Renderer,
         operation: &mut dyn widget::Operation,
     ) {
-        self.rebuild_element_with_operation(operation);
+        self.rebuild_element_with_operation(layout, operation);
 
         let tree = tree.state.downcast_mut::<Rc<RefCell<Option<Tree>>>>();
         self.with_element(|element| {
@@ -442,8 +444,9 @@ where
     fn overlay<'b>(
         &'b mut self,
         tree: &'b mut Tree,
-        layout: Layout<'_>,
+        layout: Layout<'b>,
         renderer: &Renderer,
+        viewport: &Rectangle,
         translation: Vector,
     ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
         self.rebuild_element_if_necessary();
@@ -466,6 +469,7 @@ where
                                 &mut tree.children[0],
                                 layout,
                                 renderer,
+                                viewport,
                                 translation,
                             )
                             .map(|overlay| RefCell::new(Nested::new(overlay)))
@@ -585,11 +589,10 @@ where
         &self,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
-        viewport: &Rectangle,
         renderer: &Renderer,
     ) -> mouse::Interaction {
         self.with_overlay_maybe(|overlay| {
-            overlay.mouse_interaction(layout, cursor, viewport, renderer)
+            overlay.mouse_interaction(layout, cursor, renderer)
         })
         .unwrap_or_default()
     }
@@ -660,17 +663,5 @@ where
 
             shell.invalidate_layout();
         }
-    }
-
-    fn is_over(
-        &self,
-        layout: Layout<'_>,
-        renderer: &Renderer,
-        cursor_position: Point,
-    ) -> bool {
-        self.with_overlay_maybe(|overlay| {
-            overlay.is_over(layout, renderer, cursor_position)
-        })
-        .unwrap_or_default()
     }
 }
